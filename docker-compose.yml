@@ -1,0 +1,116 @@
+version: "3.7"
+
+volumes:
+  acme-data: {}
+  blocky-data: {}
+  prometheus-data: {}
+  grafana-data: {}
+
+services:
+  traefik:
+    container_name: traefik
+    image: traefik:v2.2
+    command:
+      - --certificatesresolvers.default.acme.email=${CLOUDFLARE_API_EMAIL}
+    ports:
+      - 80:80/tcp
+      - 443:443/tcp
+    environment:
+      - CF_API_EMAIL=${CLOUDFLARE_API_EMAIL}
+      - CF_API_KEY=${CLOUDFLARE_API_KEY}
+    dns:
+      - 1.1.1.1
+    networks:
+      frontend:
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./traefik/traefik.yaml:/etc/traefik/traefik.yaml
+      - ./traefik/traefik.d:/etc/traefik/traefik.d
+      - acme-data:/acme
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: "frontend"
+      traefik.http.routers.api.rule: Host(`${HOSTNAME}.${DOMAIN}`) && (PathPrefix(`/api`) || PathPrefix(`/dashboard`))
+      traefik.http.routers.api.entrypoints: web, websecure
+      traefik.http.routers.api.tls.certresolver: default
+      traefik.http.routers.api.service: api@internal
+    restart: unless-stopped
+
+  blocky:
+    container_name: blocky
+    image: spx01/blocky:latest
+    ports:
+      - "${DNS_INTERFACE_IPV4}:53:53/tcp"
+      - "${DNS_INTERFACE_IPV4}:53:53/udp"
+      - "${DNS_INTERFACE_IPV6}:53:53/tcp"
+      - "${DNS_INTERFACE_IPV6}:53:53/udp"
+      - "4000:4000/tcp"
+    environment:
+      - TZ=Europe/London
+    networks:
+      frontend:
+      backend:
+    volumes:
+      - ./blocky/config.yml:/app/config.yml:ro
+      - blocky-data:/logs:rw
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "5"
+    labels:
+      traefik.enable: true
+      traefik.docker.network: frontend
+      traefik.http.routers.adguard.rule: Host(`${HOSTNAME}.${DOMAIN}`)
+      traefik.http.routers.adguard.entrypoints: web, websecure
+      traefik.http.routers.adguard.tls.certresolver: default
+      traefik.http.services.adguard.loadbalancer.server.scheme: http
+      traefik.http.services.adguard.loadbalancer.server.port: 4000
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+    ports:
+      - 9090:9090/tcp
+    networks:
+      frontend:
+      backend:
+    volumes:
+      - ./prometheus/:/etc/prometheus/
+      - prometheus-data:/prometheus
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    environment:
+      - GF_PANELS_DISABLE_SANITIZE_HTML=true
+      - GF_INSTALL_PLUGINS=grafana-piechart-panel
+    ports:
+      - 3000:3000/tcp
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning/:/etc/grafana/provisioning/
+    networks:
+      frontend:
+      backend:
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+
+networks:
+  frontend:
+    name: frontend
+    ipam:
+      config:
+        - subnet: 172.28.240.0/24
+  backend:
+    name: backend
+    ipam:
+      config:
+        - subnet: 172.28.241.0/24
